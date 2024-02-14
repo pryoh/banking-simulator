@@ -17,44 +17,89 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
 
 public class Main {
     public static void main(String[] args) {
+
+        try {
+            PrintStream dualPrintStream = new DualPrintStream("output.txt", System.out);
+            System.setOut(dualPrintStream);
+            System.setErr(dualPrintStream);
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+            return;
+        }
+
         BankAccount account = new BankAccount();
-        ExecutorService executorService = Executors.newFixedThreadPool(17); // 5 Depositors + 10 Withdrawals + 2 Auditors
+        ExecutorService executorService = Executors.newFixedThreadPool(17);
+
+        System.out.println("*** SIMULATION BEGINS ***");
+        System.out.printf("%-30s %-50s %-50s %s\n", "Deposit Agents", "Withdrawal Agents", "Balance", "Transaction Number");
+        System.out.printf("%-30s %-50s %-50s %s\n", "--------------", "-----------------", "-------", "------------------");
+
+        for (int i = 0; i < 10; i++) {
+            executorService.submit(new Withdrawal(account, "Agent WT" + (i+1)));
+        }
+
+        executorService.submit(new Auditor(account, "INTERNAL BANK"));
+        executorService.submit(new Auditor(account, "TREASURY DEPT"));
 
         // Create and start threads
         for (int i = 0; i < 5; i++) {
             executorService.submit(new Depositor(account, "Agent DT" + (i+1)));
         }
 
-        for (int i = 0; i < 10; i++) {
-            executorService.submit(new Withdrawal(account, "Agent WT" + (i+1)));
-        }
-
-        executorService.submit(new Auditor(account));
-        executorService.submit(new Auditor(account));
-
         // Simulate for some time (manually stop the program)
         try {
-            Thread.sleep(60000); // Adjust the simulation duration as needed
+            Thread.sleep(100000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
 
-        executorService.shutdownNow(); // Stop all threads
+        executorService.shutdownNow();
+    }
+}
+
+class DualPrintStream extends PrintStream {
+    private final PrintStream consoleStream;
+
+    public DualPrintStream(String filePath, PrintStream consoleStream) throws FileNotFoundException {
+        // Open "output.txt" in overwrite mode by not passing 'true' for append to FileOutputStream
+        super(new FileOutputStream(filePath, false)); // false or omitting the second parameter will overwrite the file
+        this.consoleStream = consoleStream;
+    }
+
+    @Override
+    public void write(byte[] buf, int off, int len) {
+        try {
+            super.write(buf, off, len); // Write to file
+            super.flush(); // Ensure data is written to file
+            consoleStream.write(buf, off, len); // Write to console
+            consoleStream.flush(); // Ensure data is output to console
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void close() {
+        super.close();
+        // Do not close consoleStream to avoid closing System.out
     }
 }
 
 class BankAccount {
-    private double balance;
+    private int balance;
     private int transactionCount = 0;
     private final ReentrantLock lock = new ReentrantLock();
-    private final Condition sufficientFunds = lock.newCondition(); // Condition for signaling
+    private final Condition sufficientFunds = lock.newCondition();
     private static final String TRANSACTION_LOG_FILE = "transactions.csv";
 
     public BankAccount() {
-        this.balance = 0.0;
+        this.balance = 0;
         initializeLogFile();
     }
 
@@ -65,59 +110,77 @@ class BankAccount {
         }
     }
 
-    public void deposit(double amount, String name) {
+    public void deposit(int amount, String name) {
         lock.lock();
         try {
             balance += amount;
             transactionCount++;
-            if (amount > 350) {
-                logTransaction(transactionCount, "deposit", amount, name);
-            }
-            sufficientFunds.signalAll();
-            System.out.println(name + " deposited $" + amount + ". New balance: $" + getBalance());
-        } finally {
-            lock.unlock();
-        }
-    }
-    
-    public boolean withdraw(double amount, String name) {
-        lock.lock();
-        try {
-            if (balance < amount) {
-                // If balance is less than amount, print message and return false
-                System.out.println(name + " attempted to withdraw $" + amount + " - insufficient funds. Thread stopping.");
-                return false; // Returning false indicates the withdrawal did not proceed
-            }
-            balance -= amount;
-            transactionCount++;
-            if (amount > 75) {
-                logTransaction(transactionCount, "withdraw", amount, name);
-            }
-            System.out.println(name + " withdrew $" + amount + ". New balance: $" + getBalance());
-            sufficientFunds.signalAll(); // Notify other threads that may be waiting for a balance change
-            return true; // Successful withdrawal
-        } finally {
-            lock.unlock();
-        }
-    }
-    
-    
-    
 
-    private void logTransaction(int transactionNumber, String type, double amount, String name) {
-        // Create a date/time string formatted as shown in the screenshot
-        String dateTimeString = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+            String transactionMessage = String.format("%-81s %-60s %-41d", 
+                                          name + " deposits $" + amount, 
+                                          "(+) Balance is $" + balance, 
+                                          transactionCount);
+            System.out.println(transactionMessage);
+
+            if (amount > 350) {
+                String flaggedTransactionMessage = String.format("\n\n*** Flagged Transaction - Depositor %s Made A Deposit In Excess Of $350.00 USD - See Flagged Transaction Log.\n\n", name);
+                System.out.println(flaggedTransactionMessage);
+                logTransaction(transactionCount, "deposit", amount, name, true); // Log only if the deposit is over $350
+            }
+
+            sufficientFunds.signalAll();
+
+        } finally {
+            lock.unlock();
+        }
+    }
     
-        // Format the transaction log entry as per the screenshot
-        String logEntry = String.format("%s %s issued %s of $%.2f at %s EST Transaction Number : %d\n",
+    public boolean withdraw(int amount, String name) {
+    lock.lock();
+    try {
+        boolean success = balance >= amount;
+        String transactionMessage;
+        if (success) {
+            balance -= amount;
+            transactionMessage = String.format("%-30s %-50s %-60s %-5d", 
+                                               "", 
+                                               name + " withdraws $" + amount, 
+                                               "(-) Balance is $" + String.format("%d", balance), 
+                                               ++transactionCount);
+        } else {
+            transactionMessage = String.format("%-30s %-50s %-60s", 
+                                               "", 
+                                               name + " withdraws $" + amount, 
+                                               "(xxxxxx) WITHDRAWAL BLOCKED - INSUFFICIENT FUNDS!!!");
+
+        }
+        System.out.println(transactionMessage);
+        if (success && amount > 75) {
+            transactionMessage = String.format("\n\n*** Flagged Transaction - Withdrawal %s Made A Withdrawal In Excess Of $75.00 USD - See Flagged Transaction Log.\n\n", name);
+            System.out.println(transactionMessage);
+            logTransaction(transactionCount, "withdraw", amount, name, true); // true for flagged transaction
+        }
+        sufficientFunds.signalAll();
+        return success;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void logTransaction(int transactionNumber, String type, int amount, String name, boolean isFlagged) {
+        String dateTimeString = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+        
+        // Conditionally prepend a tab for deposit transactions
+        String prefix = type.equals("deposit") ? "\t" : "";
+        
+        String logEntry = String.format("%s%s %s issued %s of $%d at %s EST Transaction Number : %d\n",
+                                        prefix, // Prepend tab for deposit transactions
                                         type.equals("deposit") ? "Depositor Agent" : "Withdrawal Agent",
                                         name,
                                         type,
                                         amount,
                                         dateTimeString,
                                         transactionNumber);
-    
-        // Write the formatted string to the log file
         try (BufferedWriter bw = new BufferedWriter(new FileWriter(TRANSACTION_LOG_FILE, true))) {
             bw.write(logEntry);
         } catch (IOException e) {
@@ -125,11 +188,19 @@ class BankAccount {
         }
     }
     
-
-    public double getBalance() {
+    public int getBalance() {
         lock.lock();
         try {
             return balance;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public int getTransactionCount() {
+        lock.lock();
+        try {
+            return transactionCount;
         } finally {
             lock.unlock();
         }
@@ -140,7 +211,7 @@ class BankAccount {
 class Depositor implements Runnable {
     private final BankAccount account;
     private final Random random = new Random();
-    private final String name; // Name of the depositor
+    private final String name;
 
     public Depositor(BankAccount account, String name) {
         this.account = account;
@@ -150,10 +221,10 @@ class Depositor implements Runnable {
     @Override
     public void run() {
         while (true) {
-            double amount = 1 + random.nextDouble() * 500; // Deposit amount logic
+            int amount = 1 + random.nextInt(500); // Generates an amount in cents
             account.deposit(amount, name); // Pass name to deposit
             try {
-                TimeUnit.MILLISECONDS.sleep(1000 + random.nextInt(1000)); // Sleep between 500 to 1000 ms
+                TimeUnit.MILLISECONDS.sleep(random.nextInt(15000)); // Sleep between 500 to 1000 ms
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -167,7 +238,7 @@ class Depositor implements Runnable {
 class Withdrawal implements Runnable {
     private final BankAccount account;
     private final Random random = new Random();
-    private final String name; // Name of the withdrawal agent
+    private final String name;
 
     public Withdrawal(BankAccount account, String name) {
         this.account = account;
@@ -177,10 +248,10 @@ class Withdrawal implements Runnable {
     @Override
     public void run() {
         while (true) {
-            double amount = 1 + random.nextDouble() * 99; // Withdrawal amount logic
+            int amount = 1 + random.nextInt(100);
             try {
-                account.withdraw(amount, name); // Pass name to withdraw
-                TimeUnit.MILLISECONDS.sleep(random.nextInt(500)); // Random sleep to simulate processing time
+                account.withdraw(amount, name);
+                TimeUnit.MILLISECONDS.sleep(random.nextInt(3000));
             } catch (InterruptedException e) {
                 System.out.println(name + " interrupted.");
                 Thread.currentThread().interrupt();
@@ -190,29 +261,44 @@ class Withdrawal implements Runnable {
     }
 }
 
-
-
 class Auditor implements Runnable {
     private final BankAccount account;
-    private int transactionsSinceLastAudit = 0;
-    private final int auditInterval = 100; // Adjust as needed
+    private int lastAuditTransactionCount = 0;
+    private final String name;
+    private final Random random = new Random();
 
-    public Auditor(BankAccount account) {
+    public Auditor(BankAccount account, String name) {
         this.account = account;
+        this.name = name;
     }
 
     @Override
     public void run() {
-        while (true) {
+        while (!Thread.currentThread().isInterrupted()) {
             try {
+                // Introduce a more significant random component to the audit interval for variation
+                int auditInterval = 18000 + random.nextInt(1000) - 500;
                 TimeUnit.MILLISECONDS.sleep(auditInterval);
+
+                // Perform the audit
+                performAudit();
+
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                System.out.println(name + " AUDITOR interrupted.");
+                Thread.currentThread().interrupt(); // Preserve interruption status
             }
-            double balance = account.getBalance();
-            transactionsSinceLastAudit++;
-            System.out.println("Audit - Balance: $" + balance + ", Transactions: " + transactionsSinceLastAudit);
         }
     }
-}
 
+    private void performAudit() {
+        double balance = account.getBalance();
+        int currentTransactionCount = account.getTransactionCount();
+        int transactionsSinceLastAudit = currentTransactionCount - lastAuditTransactionCount;
+
+        System.out.println("\n\n*************************************************************************************************************************\n\n" +
+                           " - " + name + " AUDITOR FINDS CURRENT ACCOUNT BALANCE TO BE: $" + String.format("%.2f", balance) +
+                           ". Number of transactions since last audit: " + transactionsSinceLastAudit + "\n\n*************************************************************************************************************************\n\n");
+
+        lastAuditTransactionCount = currentTransactionCount;
+    }
+}
